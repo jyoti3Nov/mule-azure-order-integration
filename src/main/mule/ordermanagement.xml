@@ -1,0 +1,115 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<mule xmlns:azure-storage="http://www.mulesoft.org/schema/mule/azure-storage" xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+	xmlns:json="http://www.mulesoft.org/schema/mule/json"
+	xmlns:validation="http://www.mulesoft.org/schema/mule/validation" xmlns:http="http://www.mulesoft.org/schema/mule/http" xmlns="http://www.mulesoft.org/schema/mule/core" xmlns:doc="http://www.mulesoft.org/schema/mule/documentation" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd
+http://www.mulesoft.org/schema/mule/validation http://www.mulesoft.org/schema/mule/validation/current/mule-validation.xsd
+http://www.mulesoft.org/schema/mule/json http://www.mulesoft.org/schema/mule/json/current/mule-json.xsd
+http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd
+http://www.mulesoft.org/schema/mule/azure-storage http://www.mulesoft.org/schema/mule/azure-storage/current/mule-azure-storage.xsd">
+	
+	<http:request-config name="HTTP_Request_configuration" doc:name="HTTP Request configuration" doc:id="ef7e376f-cba3-4b36-94e4-eae5a81e391b" >
+		<http:request-connection protocol="HTTPS" host="api.github.com" port="443" >
+			<http:authentication >
+				<http:basic-authentication username="jyoti3Nov" password="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" />
+			</http:authentication>
+		</http:request-connection>
+	</http:request-config>
+	
+	<flow name="ordermanagementFlow" doc:id="0319d9c1-e970-4eca-b5b5-b8ec52b7adb2" >
+		<http:listener doc:name="HTTP Listener - Create Order" doc:id="03e898bc-3be9-45b2-a8ee-d06f1fa00129" config-ref="HTTP_Listener_config1" path="/order" allowedMethods="POST">
+			<http:response statusCode="200" reasonPhrase="Login successful !" />
+			<http:error-response statusCode="#[vars.errorStatusCode]" reasonPhrase="#[vars.errorReasonPhrase]" />
+		</http:listener>
+		<logger level="INFO" doc:name="Log incoming request" doc:id="df5aecbb-d2ae-439e-9e38-f6129a041d4d" message='#[attributes.method] #[attributes.requestPath] | Payload: #[write(payload, "application/json")]'/>
+		<json:validate-schema doc:name="Validate schema" doc:id="5984fa77-6972-4782-9e7f-ce43fb655526" schema="schemas/order.schema.json"/>
+		<ee:transform doc:name="Enrich Order" doc:id="c67c4c1b-ea4f-490d-a5c1-7b08e0a71b3e" >
+			<ee:message >
+				<ee:set-payload ><![CDATA[%dw 2.0
+output application/json
+import * from dw::core::Arrays
+var nowUtc = (now() as String {format: "yyyy-MM-dd'T'HH:mm:ss'Z'"})
+---
+{
+  orderId: payload.orderId,
+  customerName: payload.customerName default "UNKNOWN",
+  items: payload.items,
+  totalAmount: payload.items
+                default []
+                reduce ((item, acc = 0) -> acc + ((item.quantity default 0) as Number) * ((item.price default 0) as Number)),
+  itemCount: (payload.items default []) reduce ((i, acc = 0) -> acc + (i.quantity default 0)),
+  orderDate: nowUtc,
+  sourceSystem: "OMS_API",
+  shippingAddress: payload.shippingAddress default null,
+  original: payload  // keep a copy for traceability
+}
+]]></ee:set-payload>
+			</ee:message>
+		</ee:transform>
+		<logger level="INFO" doc:name="Logger" doc:id="99fb619e-ac31-444c-be52-0c816174140d" message='Enriched Order: #[write(payload, "application/json")]'/>
+		<scatter-gather doc:name="Upload CSV to Azure Blob" doc:id="9ffa9397-a1ea-4a82-95cd-ba339ebd65de" >
+			<route >
+				<set-variable value='#[payload.orderId ++ "_" ++ now() as String { format: "yyyyMMdd_HHmmss" } ++ ".csv"]' doc:name="Set Variable" doc:id="9756298b-0104-4105-9647-8bc523e94cad" variableName="blobFileName" />
+				<ee:transform doc:name="Transform Message" doc:id="8b2f118c-6240-4311-b696-a8d0398846b6" >
+					<ee:message >
+						<ee:set-payload ><![CDATA[%dw 2.0
+output application/csv header=true, encoding="UTF-8",quoteValues=true, separator=";", lineSeparator="\r\n"
+---
+(payload.items default []) map (item) -> {
+    OrderId: payload.orderId default "",
+    Customer: payload.customerName default "",
+    SKU: item.sku,
+    Quantity: item.quantity,
+    Price: item.price,
+    Total: (item.quantity default 0) * (item.price default 0),
+    ShippingAddress: payload.shippingAddress default "",
+    OrderDate: payload.orderDate default ""
+}]]></ee:set-payload>
+					</ee:message>
+				</ee:transform>
+				<azure-storage:upload-blob doc:name="Upload blob" doc:id="8b4f7940-bfb8-4163-8165-4dd26475cb7c" config-ref="Azure_Storage_Config" contentType="application/csv">
+			<azure-storage:storblob container="orders" fileName="#[vars.blobFileName]" fileStream="#[payload]" />
+		</azure-storage:upload-blob>
+			</route>
+			<route>
+        <!-- Temporary dummy route until we add Route B -->
+        <logger level="INFO" message="Placeholder second route"/>
+    </route>
+		</scatter-gather>
+		<error-handler doc:id="913c5305-4b0e-4a76-b95e-799dc64adc7e">
+			<on-error-propagate enableNotifications="true" logException="true" doc:name="on error 400" doc:id="cce105e1-3bca-4455-8271-9116416e6173" type="JSON:INVALID_INPUT_JSON, JSON:INVALID_SCHEMA, JSON:SCHEMA_NOT_FOUND, JSON:SCHEMA_NOT_HONOURED">
+				<ee:transform doc:name="Transform Message" doc:id="969e604b-10f1-48c0-a7e2-c95890e51ae6" >
+					<ee:message >
+						<ee:set-payload ><![CDATA[%dw 2.0
+output application/json
+---
+{
+  message: "Invalid request",
+  details: error.description default error.message,
+  errorType: error.errorType.identifier
+}
+]]></ee:set-payload>
+					</ee:message>
+				</ee:transform>
+				<set-variable value="400" doc:name="Set Status Code" doc:id="86e4c6d7-0f8b-43ef-a72d-62eaa534d654" variableName="errorStatusCode"/>
+			</on-error-propagate>
+			<on-error-propagate enableNotifications="true" logException="true" doc:name="on error 500" doc:id="b809f811-080b-408d-8d46-57ee2a2c6741" type="EXPRESSION, STREAM_MAXIMUM_SIZE_EXCEEDED">
+				<ee:transform doc:name="Transform Message" doc:id="e27ea4d5-62da-4df3-9692-855c3e316fcb" >
+					<ee:message >
+						<ee:set-payload ><![CDATA[%dw 2.0
+output application/json
+---
+{
+  message: "Internal server error",
+  errorType: error.errorType.identifier,
+  trackingId: attributes.correlationId default null
+}
+]]></ee:set-payload>
+					</ee:message>
+				</ee:transform>
+				<set-variable value="500" doc:name="Set Status Code" doc:id="6774e975-dce1-4127-ac6d-a711353c99df" variableName="errorStatusCode"/>
+			</on-error-propagate>
+		</error-handler>
+	</flow>
+</mule>
