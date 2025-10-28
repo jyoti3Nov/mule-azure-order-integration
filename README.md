@@ -1,2 +1,6 @@
-# mule-azure-order-integration
-an orders management project which sends the enriched json to azure container.
+# Mule Azure Order Integration
+A Mule 4 application that writes CSV orders to Azure Blob Storage.
+
+## Build
+```bash
+mvn clean package -DskipTests
